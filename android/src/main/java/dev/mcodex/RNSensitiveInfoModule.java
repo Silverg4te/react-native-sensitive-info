@@ -76,27 +76,30 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
     private FingerprintManager mFingerprintManager;
     private KeyStore mKeyStore;
     private CancellationSignal mCancellationSignal;
+    private int attemptCounter = 0;
 
     // Keep it true by default to maintain backwards compatibility with existing users.
     private boolean invalidateEnrollment = true;
 
+    private BiometricPrompt biometricPrompt;
+
     public RNSensitiveInfoModule(ReactApplicationContext reactContext) {
         super(reactContext);
-        
+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR2) {
             Exception cause = new RuntimeException("Keystore is not supported!");
             throw new RuntimeException("Android version is too low", cause);
         }
-        
+
         try {
             mKeyStore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER);
             mKeyStore.load(null);
         } catch (Exception e) {
             e.printStackTrace();
         }
-        
+
         initKeyStore();
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
                 mFingerprintManager = (FingerprintManager) reactContext.getSystemService(Context.FINGERPRINT_SERVICE);
@@ -284,7 +287,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         SharedPreferences.Editor editor = mSharedPreferences.edit();
         editor.putString(key, value).apply();
     }
-    
+
     /**
      * Generates a new RSA key and stores it under the { @code KEY_ALIAS } in the
      * Android Keystore.
@@ -313,7 +316,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                     .setStartDate(notBefore.getTime())
                     .setEndDate(notAfter.getTime())
                     .build();
-                    KeyPairGenerator kpGenerator = KeyPairGenerator.getInstance("RSA", ANDROID_KEYSTORE_PROVIDER);   
+                    KeyPairGenerator kpGenerator = KeyPairGenerator.getInstance("RSA", ANDROID_KEYSTORE_PROVIDER);
                     kpGenerator.initialize(spec);
                     kpGenerator.generateKeyPair();
                 }
@@ -340,7 +343,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
 
                                 FragmentActivity fragmentActivity = (FragmentActivity) getCurrentActivity();
                                 Executor executor = Executors.newSingleThreadExecutor();
-                                BiometricPrompt biometricPrompt = new BiometricPrompt(fragmentActivity, executor, callback);
+                                biometricPrompt = new BiometricPrompt(fragmentActivity, executor, callback);
 
                                 BiometricPrompt.PromptInfo promptInfo = new BiometricPrompt.PromptInfo.Builder()
                                         .setDeviceCredentialAllowed(false)
@@ -349,6 +352,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                         .setTitle(strings.containsKey("header") ? strings.get("header").toString() : "Unlock with your fingerprint")
                                         .build();
                                 biometricPrompt.authenticate(promptInfo, cryptoObject);
+                                return;
                             } catch (Exception e) {
                                 throw e;
                             }
@@ -374,7 +378,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
     }
 
     private void prepareKey() throws Exception {
-        
+
         KeyGenerator keyGenerator = KeyGenerator.getInstance(
                 KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE_PROVIDER);
 
@@ -551,6 +555,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                                         decryptWithAes(encrypted, true, strings, pm, result.getCryptoObject().getCipher());
                                     }
+                                    attemptCounter = 0;
                                 }
 
                                 @Override
@@ -562,6 +567,12 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                 public void onAuthenticationFailed() {
                                     getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                                             .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Authentication not recognized.");
+
+                                    attemptCounter += 1;
+                                    if (attemptCounter >= 3) {
+                                      biometricPrompt.cancelAuthentication();
+                                      attemptCounter = 0;
+                                    }
                                 }
                             }
 
@@ -576,6 +587,12 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                             super.onAuthenticationFailed();
                                             getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                                                     .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Fingerprint not recognized.");
+
+                                            attemptCounter += 1;
+                                            if (attemptCounter >= 3) {
+                                              mCancellationSignal.cancel();
+                                              attemptCounter = 0;
+                                            }
                                         }
 
                                         @Override
@@ -597,6 +614,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                                                 decryptWithAes(encrypted, false, strings, pm, result.getCryptoObject().getCipher());
                                             }
+                                            attemptCounter = 0;
                                         }
                                     }, null);
                         }
@@ -637,11 +655,11 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
             pm.reject(AppConstants.E_BIOMETRIC_NOT_SUPPORTED, "Biometrics not supported");
         }
     }
-    
+
     public String encrypt(String input) throws Exception {
         byte[] bytes = input.getBytes();
         Cipher c;
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Key secretKey = ((KeyStore.SecretKeyEntry) mKeyStore.getEntry(KEY_ALIAS, null)).getSecretKey();
             c = Cipher.getInstance(AES_GCM);
